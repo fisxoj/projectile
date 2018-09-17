@@ -2195,14 +2195,29 @@ With a prefix ARG invalidates the cache first."
 
 (defun projectile-test-file-p (file)
   "Check if FILE is a test file."
-  (or (cl-some (lambda (pat) (string-prefix-p pat (file-name-nondirectory file)))
-               (delq nil (list (funcall projectile-test-prefix-function (projectile-project-type)))))
-      (cl-some (lambda (pat) (string-suffix-p pat (file-name-sans-extension (file-name-nondirectory file))))
-               (delq nil (list (funcall projectile-test-suffix-function (projectile-project-type)))))))
+  (or (when-let ((prefix (funcall projectile-test-prefix-function (projectile-project-type))))
+        (string-prefix-p prefix (file-name-nondirectory file)))
+      (when-let ((suffix (funcall projectile-test-suffix-function (projectile-project-type))))
+        (string-suffix-p suffix (file-name-sans-extension (file-name-nondirectory file))))
+      (when-let ((test-dir (projectile-test-directory (projectile-project-type)))
+                 ;; This function receives filenames that are relative to the project or absolute.
+                 ;; We want the relative ones, so ensure it is here.
+                 (project-relative-file (if (file-name-absolute-p file)
+                                            (file-relative-name (file-truename file) (projectile-project-root))
+                                          file)))
+        (string-prefix-p test-dir project-relative-file))))
 
 (defun projectile-current-project-test-files ()
   "Return a list of test files for the current project."
   (projectile-test-files (projectile-current-project-files)))
+
+(defun projectile-implementation-files (files)
+  "Return only the implementation FILES."
+  (cl-remove-if 'projectile-test-file-p files))
+
+(defun projectile-current-project-implementation-files ()
+  "Return a list of implementation files for the current project."
+  (projectile-implementation-files (projectile-current-project-files)))
 
 (defvar projectile-project-types (make-hash-table)
   "A hash table holding all project types that are known to Projectile.")
@@ -2262,6 +2277,36 @@ TEST-DIR which specifies the path to the tests relative to the project root."
   :group 'projectile
   :type 'function)
 
+(defun projectile-cl-project-p ()
+  "Identifies a project as being common lisp by the presence of files with .cl or .lisp extensions"
+  (cl-some (lambda (file)
+             (cl-member (file-name-extension file) '("lisp" "cl") :test #'string-equal))
+           (projectile-current-project-files)))
+
+(defun projectile-cl-eval-function ()
+  (cond
+   ((require 'sly nil t) (values 'sly-eval-async "sly"))
+   ((require 'slime nil t) (values 'slime-eval-async "slime"))
+   (t (error "Neither sly nor slime seems to be installed."))))
+
+(defun projectile-cl-test-function ()
+  "Calls into slime to run the current project's tests with asdf."
+  (multiple-value-bind (async-eval repl-name) (projectile-cl-eval-function)
+    (message "Testing %s in %s..." (projectile-project-name) repl-name)
+    (funcall async-eval
+             `(asdf:test-system ,(projectile-project-name))
+     (lambda (result) (message "Tests finished with result %s" result))
+     "CL-USER")))
+
+(defun projectile-cl-load-project ()
+  "Loads the current project with ASDF in the running repl."
+  (multiple-value-bind (async-eval repl-name) (projectile-cl-eval-function)
+    (message "Loading %s in %s..." (projectile-project-name) repl-name)
+    (funcall async-eval
+             `(asdf:load-system ,(projectile-project-name))
+             (lambda (result)
+               (message (if result "Loaded %s." "Failed to load %s.") (projectile-project-name))))))
+
 (define-obsolete-variable-alias 'projectile-go-function 'projectile-go-project-test-function "1.0.0")
 
 ;;; Project type registration
@@ -2284,6 +2329,11 @@ TEST-DIR which specifies the path to the tests relative to the project root."
                                   :compile "go build ./..."
                                   :test "go test ./..."
                                   :test-suffix "_test")
+(projectile-register-project-type 'common-lisp 'projectile-cl-project-p
+                                  :compile 'projectile-cl-load-project
+                                  :test 'projectile-cl-test-function
+                                  :test-dir "t/"
+                                  :src-dir "src/")
 ;; File-based detection project types
 (projectile-register-project-type 'emacs-cask '("Cask")
                                   :compile "cask install"
@@ -2439,6 +2489,7 @@ TEST-DIR which specifies the path to the tests relative to the project root."
                                   :test-dir "spec/"
                                   :test-suffix "_spec")
 
+
 (defvar-local projectile-project-type nil
   "Buffer local var for overriding the auto-detected project type.
 Normally you'd set this from .dir-locals.el.")
@@ -2558,7 +2609,7 @@ test file."
   (unless file-name (error "The current buffer is not visiting a file"))
   (if (projectile-test-file-p file-name)
       ;; find the matching impl file
-      (let ((impl-file (projectile-find-matching-file file-name)))
+      (let ((impl-file (projectile-find-implementation-file file-name)))
         (if impl-file
             (projectile-expand-root impl-file)
           (error
@@ -2648,16 +2699,20 @@ Fallback to DEFAULT-VALUE for missing attributes."
   (let* ((basename (file-name-nondirectory (file-name-sans-extension file)))
          (test-prefix (funcall projectile-test-prefix-function (projectile-project-type)))
          (test-suffix (funcall projectile-test-suffix-function (projectile-project-type)))
+         (test-dir (projectile-test-directory (projectile-project-type)))
          (candidates
           (cl-remove-if-not
            (lambda (current-file)
              (let ((name (file-name-nondirectory
                           (file-name-sans-extension current-file))))
-               (or (when test-prefix
-                     (string-equal name (concat test-prefix basename)))
-                   (when test-suffix
-                     (string-equal name (concat basename test-suffix))))))
-           (projectile-current-project-files))))
+               (or
+                (when test-prefix
+                  (string-equal name (concat test-prefix basename)))
+                (when test-suffix
+                  (string-equal name (concat basename test-suffix)))
+                (when test-dir
+                  (string-equal name basename)))))
+           (projectile-current-project-test-files))))
     (cond
      ((null candidates) nil)
      ((= (length candidates) 1) (car candidates))
@@ -2668,11 +2723,12 @@ Fallback to DEFAULT-VALUE for missing attributes."
              "Switch to: "
              (apply 'append (mapcar 'cdr grouped-candidates)))))))))
 
-(defun projectile-find-matching-file (test-file)
-  "Compute the name of a file matching TEST-FILE."
+(defun projectile-find-implementation-file (test-file)
+  "Compute the name of an implementation file matching TEST-FILE."
   (let* ((basename (file-name-nondirectory (file-name-sans-extension test-file)))
          (test-prefix (funcall projectile-test-prefix-function (projectile-project-type)))
          (test-suffix (funcall projectile-test-suffix-function (projectile-project-type)))
+         (test-dir (projectile-test-directory (projectile-project-type)))
          (candidates
           (cl-remove-if-not
            (lambda (current-file)
@@ -2681,8 +2737,10 @@ Fallback to DEFAULT-VALUE for missing attributes."
                (or (when test-prefix
                      (string-equal (concat test-prefix name) basename))
                    (when test-suffix
-                     (string-equal (concat name test-suffix) basename)))))
-           (projectile-current-project-files))))
+                     (string-equal (concat name test-suffix) basename))
+                   (when test-dir
+                     (string-equal name basename)))))
+           (projectile-current-project-implementation-files))))
     (cond
      ((null candidates) nil)
      ((= (length candidates) 1) (car candidates))

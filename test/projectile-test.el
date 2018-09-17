@@ -779,7 +779,7 @@
         (noflet ((projectile-project-type () 'rails-rspec)
                  (projectile-project-root () (file-truename (expand-file-name "project/"))))
           (should (equal "app/models/food/sea.rb"
-                         (projectile-find-matching-file
+                         (projectile-find-implementation-file
                           "spec/models/food/sea_spec.rb"))))))))
 
 (ert-deftest projectile-test-find-matching-test/file-custom-project ()
@@ -798,7 +798,7 @@
         (noflet ((projectile-project-type () 'npm-project)
                  (projectile-project-root () (file-truename (expand-file-name "project/"))))
           (let ((test-file (projectile-find-matching-test "src/foo/foo.service.js"))
-                (impl-file (projectile-find-matching-file "test/bar/bar.service.spec.js")))
+                (impl-file (projectile-find-implementation-file "test/bar/bar.service.spec.js")))
             (should (equal "test/foo/foo.service.spec.js" test-file))
             (should (equal "src/bar/bar.service.js" impl-file))))))))
 
@@ -821,7 +821,7 @@
         (noflet ((projectile-project-type () 'npm-project)
                  (projectile-project-root () (file-truename (expand-file-name "project/"))))
           (let ((test-file (projectile-find-matching-test "source/foo/foo.service.js"))
-                (impl-file (projectile-find-matching-file "spec/bar/bar.service.spec.js")))
+                (impl-file (projectile-find-implementation-file "spec/bar/bar.service.spec.js")))
             (should (equal "spec/foo/foo.service.spec.js" test-file))
             (should (equal "source/bar/bar.service.js" impl-file))))))))
 
